@@ -2,12 +2,15 @@
 
 This is a small haskell program implementing a udp broadcast chat client.
 
-Dependencies:
+![bcast](bcast.png)
 
-* `vty` provides the UI.
-* `network` provides the sockets.
-* `async` provides threads.
-* `stm` provides mutable references which can be accessed atomically.
+Usage:
+
+* You can run with `USAGE: bcast username listen-addr send-addr port`
+* Or you can just use `USAGE: bcast username`
+* Type words, use the left, right, home, end keys to move the cursor.
+* Press enter to send.
+* Press escape to quit. (`/quit` isn't a command, just for show)
 
 ## architecture
 
@@ -46,3 +49,10 @@ There are five threads:
       implementing a consensus protocol. Much of the time you'd need to reorder
       and delay received messages before delivering them to the application.
       This thread might be where that code would go?
+
+Dependencies:
+
+* `vty` provides the UI.
+* `network` provides the sockets.
+* `async` provides threads.
+* `stm` provides mutable references which can be accessed atomically.
