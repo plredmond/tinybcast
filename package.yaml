@@ -1,0 +1,19 @@
+name: tinybcast
+
+dependencies:
+- async
+- base
+- network
+- stm
+- vty
+- zlib
+
+library:
+  source-dirs: lib
+
+executables:
+  bcast:
+    main: Main.hs
+    ghc-options: -threaded -rtsopts -with-rtsopts=-N
+    dependencies:
+    - tinybcast
