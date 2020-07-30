@@ -1,0 +1,15 @@
+digraph G {
+    node[shape=box];
+
+    vty -> appState [label="frontendInput", color=green];
+    vty -> netOutbox [label="frontendInput", color=green];
+
+    appState -> vty [label="frontendDisplay", color=purple];
+
+    netOutbox -> UDP_SEND[label="backendSend", color=blue];
+    netOutbox -> netInbox [label="backendSend", color=blue];
+
+    UDP_RECV -> netInbox [label="backendReceive", color=orange];
+
+    netInbox -> appState [label="protocolReordering", color=yellow];
+}
