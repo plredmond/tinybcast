@@ -1,9 +1,8 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
--- {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
---import qualified Codec.Compression.GZip as GZip
+--import qualified Codec.Compression.GZip as GZip -- TODO: don't send raw `Show` data
 import Control.Monad (forever)
 import System.Environment (getArgs, getProgName)
 import Text.Read (readMaybe)
