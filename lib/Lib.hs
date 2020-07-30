@@ -24,7 +24,7 @@ withSock :: Maybe S.HostName -> Maybe S.ServiceName -> (S.Socket -> IO c) -> IO 
 withSock host service = Exception.bracket
     (do addr:_ <- S.getAddrInfo (Just S.defaultHints{S.addrSocketType=S.Datagram}) host service
         sock <- S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)
-        S.setSocketOption sock S.ReusePort 1
+        -- S.setSocketOption sock S.ReusePort 1 -- XXX probably shouldn't leave this enabled by default because it gives weird behavior
         S.setSocketOption sock S.Broadcast 1
         S.bind sock $ S.addrAddress addr
         return sock)
@@ -36,6 +36,7 @@ main = do
         ["ipv6-multi", u] -> return ("IPv6-multi-"++u, "::", "ff02::1", "8999")
         ["ipv4-multi", u] -> return ("IPv4-multi-"++u, "0.0.0.0", "224.0.0.1", "8999")
         ["ipv4-broad", u] -> return ("IPv6-broad-"++u, "0.0.0.0", "192.168.1.255", "8999")
+        [name] -> return (name, "0.0.0.0", "192.168.1.255", "8999")
         [u, la, sa, p] -> return (u, la, sa, p)
         _ -> getProgName >>= \prog -> error $ "USAGE: "++prog++" username listen-addr send-addr port"
     state <- State
@@ -70,7 +71,8 @@ data State as ev = State
 logIO :: String -> String -> State AppState ev -> IO ()
 logIO tag message State{appState} = STM.atomically $ STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
 
--- | Block until a vty event, then emit to outbox and apply to appstate
+-- | Block until a `vty` event, apply the event to `appState`, optionally emit
+-- to `netOutbox`.
 frontendInput :: Vty.Vty -> State AppState NetEvent -> IO ()
 frontendInput vty State{appState, netOutbox} = do
     localEvent <- Vty.nextEvent vty -- XXX this is specific to the application
@@ -79,27 +81,29 @@ frontendInput vty State{appState, netOutbox} = do
         maybe (return ()) (STM.writeTChan netOutbox) $ generateNetEvent localEvent appState_
         STM.writeTVar appState $ applyLocalEvent localEvent appState_
 
--- | Render and then block until appstate changes
+-- | Render `appState` to `vty` and then block until `appState` changes.
 frontendDisplay :: Vty.Vty -> State AppState NetEvent -> IO ()
 frontendDisplay vty State{appState} = do
     appState_ <- STM.atomically . STM.readTVar $ appState
     Vty.update vty $ render appState_ -- XXX this is specific to the application
     STM.atomically $ STM.check . (/= appState_) =<< STM.readTVar appState
 
--- | Block on outbox and then pass it to the network (and to inbox)
+-- | Block until a `netOutbox` event, broadcast it to the network (and also
+-- copy it over to `netInbox`).
 backendSend :: S.Socket -> S.SockAddr -> State AppState NetEvent -> IO ()
 backendSend sock bcast State{netOutbox, netInbox} = do
     ev <- STM.atomically . STM.readTChan $ netOutbox
     SBS.sendAllTo sock (BS.pack $ show ev) bcast
-    STM.atomically $ STM.writeTChan netInbox ev -- XXX
+    STM.atomically $ STM.writeTChan netInbox ev -- XXX skip the network for ui feedback?
 
--- | Block on receipt, deserialize, and pass it to inbox
+-- | Block until the network receives a packet, deserialize it and emit to
+-- `netInbox`.
 backendReceive :: S.Socket -> State AppState NetEvent -> IO ()
 backendReceive sock s@State{netInbox} = do
     (raw, _) <- SBS.recvFrom sock 4096
     maybe (logIO "recv-malformed" (BS.unpack raw) s) (STM.atomically . STM.writeTChan netInbox) (readMaybe . BS.unpack $ raw)
 
--- | Block on inbox and apply to appstate
+-- | Block until a `netInbox` event and apply it to `appState`.
 protocolReordering :: State AppState NetEvent -> IO ()
 protocolReordering State{appState, netInbox} = do
     STM.atomically $ do
