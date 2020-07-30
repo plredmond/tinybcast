@@ -3,61 +3,108 @@
 -- {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
-import System.Environment (getArgs, getProgName)
-import Control.Monad (forever)
---import Network.Socket
---import Network.Socket.ByteString.Lazy
 --import qualified Codec.Compression.GZip as GZip
+import Control.Monad (forever)
+import System.Environment (getArgs, getProgName)
+import Text.Read (readMaybe)
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.STM as STM
 import qualified Control.Exception as Exception
+import qualified Data.ByteString.Char8 as BS
 import qualified Graphics.Vty as Vty
+import qualified Network.Socket as S
+import qualified Network.Socket.ByteString as SBS
 
 withVty :: (Vty.Vty -> IO c) -> IO c
 withVty = Exception.bracket
     (Vty.mkVty =<< Vty.standardIOConfig)
     (Vty.shutdown)
 
+withSock :: Maybe S.HostName -> Maybe S.ServiceName -> (S.Socket -> IO c) -> IO c
+withSock host service = Exception.bracket
+    (do addr:_ <- S.getAddrInfo (Just S.defaultHints{S.addrSocketType=S.Datagram}) host service
+        sock <- S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)
+        S.setSocketOption sock S.ReusePort 1
+        S.setSocketOption sock S.Broadcast 1
+        S.bind sock $ S.addrAddress addr
+        return sock)
+    S.close
+
 main :: IO ()
-main = withVty $ \vty -> do
-    username <- getArgs >>= \case
-        [name] -> return name
-        _ -> getProgName >>= \prog -> error $ "USAGE: "++prog++" username"
+main = do
+    (username, listenAddr, sendAddr, port) <- getArgs >>= \case
+        ["ipv6-multi", u] -> return ("IPv6-multi-"++u, "::", "ff02::1", "8999")
+        ["ipv4-multi", u] -> return ("IPv4-multi-"++u, "0.0.0.0", "224.0.0.1", "8999")
+        ["ipv4-broad", u] -> return ("IPv6-broad-"++u, "0.0.0.0", "192.168.1.255", "8999")
+        [u, la, sa, p] -> return (u, la, sa, p)
+        _ -> getProgName >>= \prog -> error $ "USAGE: "++prog++" username listen-addr send-addr port"
     state <- State
-        <$> return vty
-        <*> (STM.newTVarIO AppState{username, buffer="", curPos=0, history=[]})
+        <$> (STM.newTVarIO AppState{username, buffer="", curPos=0, history=[]})
         <*> STM.newTChanIO
         <*> STM.newTChanIO
-    Async.mapConcurrently_
-        ($ state)
-        [ forever . frontendInput
-        , forever . frontendDisplay
-        ]
+    bcast <- do
+        info:_ <- S.getAddrInfo  (Just S.defaultHints{S.addrSocketType=S.Datagram}) (Just sendAddr) (Just port)
+        return $ S.addrAddress info
+    withSock (Just listenAddr) (Just port) $ \sock ->
+        withVty $ \vty -> do
+            _ <- Async.waitAny =<< mapM (\act -> Async.async . forever . act $ state)
+                [ forever . frontendInput vty
+                , forever . frontendDisplay vty
+                , forever . backendSend sock bcast
+                , forever . backendReceive sock
+                , forever . protocolReordering
+                ]
+            return ()
 
 -- * Framework
 
-data State fs as ae = State
-    { frontendState :: fs
-    , appState :: STM.TVar as
-    , netOutbox :: STM.TChan ae
-    , netInbox :: STM.TChan ae
+data State as ev = State
+    { appState :: STM.TVar as
+    , netOutbox :: STM.TChan ev
+    , netInbox :: STM.TChan ev
     }
 
--- | Block until a vty event, then emit net events and update local app state
-frontendInput :: State Vty.Vty AppState NetEvent -> IO ()
-frontendInput State{frontendState, appState, netOutbox} = do
-    localEvent <- Vty.nextEvent frontendState -- XXX this is specific to the application
+-- exceptions can kill subthreads
+-- there's no printout when threads die
+
+logIO :: String -> String -> State AppState ev -> IO ()
+logIO tag message State{appState} = STM.atomically $ STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
+
+-- | Block until a vty event, then emit to outbox and apply to appstate
+frontendInput :: Vty.Vty -> State AppState NetEvent -> IO ()
+frontendInput vty State{appState, netOutbox} = do
+    localEvent <- Vty.nextEvent vty -- XXX this is specific to the application
     STM.atomically $ do
         appState_ <- STM.readTVar appState
-        maybe (return ()) (STM.writeTChan netOutbox) $ generateNetEvent appState_ localEvent
-        STM.writeTVar appState $ applyLocalEvent appState_ localEvent
+        maybe (return ()) (STM.writeTChan netOutbox) $ generateNetEvent localEvent appState_
+        STM.writeTVar appState $ applyLocalEvent localEvent appState_
 
 -- | Render and then block until appstate changes
-frontendDisplay :: State Vty.Vty AppState NetEvent -> IO ()
-frontendDisplay State{frontendState, appState, netInbox} = do
+frontendDisplay :: Vty.Vty -> State AppState NetEvent -> IO ()
+frontendDisplay vty State{appState} = do
     appState_ <- STM.atomically . STM.readTVar $ appState
-    Vty.update frontendState $ render appState_ -- XXX this is specific to the application
+    Vty.update vty $ render appState_ -- XXX this is specific to the application
     STM.atomically $ STM.check . (/= appState_) =<< STM.readTVar appState
+
+-- | Block on outbox and then pass it to the network (and to inbox)
+backendSend :: S.Socket -> S.SockAddr -> State AppState NetEvent -> IO ()
+backendSend sock bcast State{netOutbox, netInbox} = do
+    ev <- STM.atomically . STM.readTChan $ netOutbox
+    SBS.sendAllTo sock (BS.pack $ show ev) bcast
+    STM.atomically $ STM.writeTChan netInbox ev -- XXX
+
+-- | Block on receipt, deserialize, and pass it to inbox
+backendReceive :: S.Socket -> State AppState NetEvent -> IO ()
+backendReceive sock s@State{netInbox} = do
+    (raw, _) <- SBS.recvFrom sock 4096
+    maybe (logIO "recv-malformed" (BS.unpack raw) s) (STM.atomically . STM.writeTChan netInbox) (readMaybe . BS.unpack $ raw)
+
+-- | Block on inbox and apply to appstate
+protocolReordering :: State AppState NetEvent -> IO ()
+protocolReordering State{appState, netInbox} = do
+    STM.atomically $ do
+        ev <- STM.readTChan netInbox
+        STM.writeTVar appState . applyNetEvent ev =<< STM.readTVar appState
 
 -- * Application
 
@@ -72,7 +119,7 @@ type LocalEvent = Vty.Event
 data NetEvent = NetEvent
     { sender :: String
     , message :: String
-    }
+    } deriving (Show, Read)
 
 -- | This function enforces the state invariants which you might want to model
 -- using LH.
@@ -82,8 +129,11 @@ fixState state@AppState{buffer, curPos, history} = state
         , history = take 10 history
         }
 
-applyLocalEvent :: AppState -> LocalEvent -> AppState
-applyLocalEvent state@AppState{buffer, curPos, history} event = fixState $ case event of
+applyLog :: String -> String -> AppState -> AppState
+applyLog tag message state@AppState{history} = state{history=('<':tag++'>':' ':message):history}
+
+applyLocalEvent :: LocalEvent -> AppState -> AppState
+applyLocalEvent event state@AppState{buffer, curPos} = fixState $ case event of
     Vty.EvKey  Vty.KEnter   [] -> state{buffer="", curPos=0}
     Vty.EvKey  Vty.KHome    [] -> state{curPos=0}
     Vty.EvKey  Vty.KEnd     [] -> state{curPos=length buffer}
@@ -92,19 +142,19 @@ applyLocalEvent state@AppState{buffer, curPos, history} event = fixState $ case 
     Vty.EvKey (Vty.KChar c) [] -> state{buffer=atLoc curPos buffer $ \fore aft -> fore++c:aft, curPos=curPos+1}
     Vty.EvKey  Vty.KBS      [] -> state{buffer=atLoc curPos buffer $ \fore aft -> safeInit fore++aft, curPos=curPos-1}
     Vty.EvKey  Vty.KEsc     [] -> error "done"
-    ev                         -> state{history=("Unknown input: "++show ev):history}
+    ev                         -> applyLog "unknown-input" (show ev) state
   where
     atLoc n xs f = let (fore, aft) = splitAt n xs in f fore aft
     safeInit [] = []
     safeInit xs = init xs
 
-generateNetEvent :: AppState -> LocalEvent -> Maybe NetEvent
-generateNetEvent AppState{username, buffer} event = case event of
+generateNetEvent :: LocalEvent -> AppState -> Maybe NetEvent
+generateNetEvent event AppState{username, buffer} = case event of
     Vty.EvKey  Vty.KEnter   [] -> Just NetEvent{sender=username, message=buffer}
     _                          -> Nothing
 
-applyNetEvent :: AppState -> NetEvent -> AppState
-applyNetEvent state@AppState{history} event = fixState $ case event of
+applyNetEvent :: NetEvent -> AppState -> AppState
+applyNetEvent event state@AppState{history} = fixState $ case event of
     NetEvent{sender, message} -> state{history=('[':sender++']':' ':message):history}
 
 render :: AppState -> Vty.Picture

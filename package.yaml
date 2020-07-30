@@ -3,6 +3,7 @@ name: tinybcast
 dependencies:
 - async
 - base
+- bytestring
 - network
 - stm
 - vty
