@@ -1,6 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
--- {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
 import Control.Monad (forever)
