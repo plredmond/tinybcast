@@ -68,9 +68,6 @@ data State as ev = State
     , netInbox :: STM.TChan ev
     }
 
--- exceptions can kill subthreads
--- there's no printout when threads die
-
 logIO :: String -> String -> State AppState ev -> IO ()
 logIO tag message State{appState} = STM.atomically $ STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
 
@@ -148,7 +145,7 @@ applyLocalEvent event state@AppState{buffer, curPos} = fixState $ case event of
     Vty.EvKey  Vty.KRight   [] -> state{curPos=curPos+1}
     Vty.EvKey (Vty.KChar c) [] -> state{buffer=atLoc curPos buffer $ \fore aft -> fore++c:aft, curPos=curPos+1}
     Vty.EvKey  Vty.KBS      [] -> state{buffer=atLoc curPos buffer $ \fore aft -> safeInit fore++aft, curPos=curPos-1}
-    Vty.EvKey  Vty.KEsc     [] -> error "done"
+    Vty.EvKey  Vty.KEsc     _  -> error "Esc key pressed"
     ev                         -> applyLog "unknown-input" (show ev) state
   where
     atLoc n xs f = let (fore, aft) = splitAt n xs in f fore aft
@@ -157,7 +154,7 @@ applyLocalEvent event state@AppState{buffer, curPos} = fixState $ case event of
 
 generateNetEvent :: LocalEvent -> AppState -> Maybe NetEvent
 generateNetEvent event AppState{username, buffer} = case event of
-    Vty.EvKey  Vty.KEnter   [] -> Just NetEvent{sender=username, message=buffer}
+    Vty.EvKey  Vty.KEnter   [] -> if null buffer then Nothing else Just NetEvent{sender=username, message=buffer}
     _                          -> Nothing
 
 applyNetEvent :: NetEvent -> AppState -> AppState
