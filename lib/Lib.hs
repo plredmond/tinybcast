@@ -45,6 +45,8 @@ main = do
         return $ S.addrAddress addr
     withSock (Just listenHost) (Just listenPort) $ \sock ->
         withVty $ \vty -> do
+            S.getSocketName sock >>= \n -> logIO "listen-on" (show n) state
+            logIO "send-to" (unwords $ show <$> destAddrs) state
             _ <- Async.waitAny =<< mapM (\act -> Async.async . forever . act $ state)
                 [ forever . frontendInput vty
                 , forever . frontendDisplay vty
@@ -91,10 +93,10 @@ frontendDisplay vty State{appState} = do
 
 -- | Block until a `netOutbox` event, broadcast it to the network (and also
 -- copy it over to `netInbox`).
-backendSend :: S.Socket -> S.SockAddr -> State AppState NetEvent -> IO ()
-backendSend sock bcast State{netOutbox, netInbox} = do
+backendSend :: S.Socket -> [S.SockAddr] -> State AppState NetEvent -> IO ()
+backendSend sock dests State{netOutbox, netInbox} = do
     ev <- STM.atomically . STM.readTChan $ netOutbox
-    SBS.sendAllTo sock (BS.pack $ show ev) bcast
+    mapM_ (SBS.sendAllTo sock (BS.pack $ show ev)) dests
     STM.atomically $ STM.writeTChan netInbox ev -- XXX skip the network for ui feedback?
 
 -- | Block until the network receives a packet, deserialize it and emit to
