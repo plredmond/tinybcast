@@ -3,7 +3,6 @@
 -- {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
---import qualified Codec.Compression.GZip as GZip
 import Control.Monad (forever)
 import System.Environment (getArgs, getProgName)
 import Text.Read (readMaybe)
@@ -15,11 +14,13 @@ import qualified Graphics.Vty as Vty
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SBS
 
+-- | Setup and teardown a vty controlling the terminal
 withVty :: (Vty.Vty -> IO c) -> IO c
 withVty = Exception.bracket
     (Vty.mkVty =<< Vty.standardIOConfig)
     (Vty.shutdown)
 
+-- | Open, bind, and close a broadcast socket
 withSock :: Maybe S.HostName -> Maybe S.ServiceName -> (S.Socket -> IO c) -> IO c
 withSock host service = Exception.bracket
     (do addr:_ <- S.getAddrInfo (Just S.defaultHints{S.addrSocketType=S.Datagram}) host service
@@ -68,6 +69,7 @@ data State as ev = State
     , netInbox :: STM.TChan ev
     }
 
+-- | Logging utility
 logIO :: String -> String -> State AppState ev -> IO ()
 logIO tag message State{appState} = STM.atomically $ STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
 
@@ -93,7 +95,7 @@ frontendDisplay vty State{appState} = do
 backendSend :: S.Socket -> [S.SockAddr] -> State AppState NetEvent -> IO ()
 backendSend sock dests State{netOutbox, netInbox} = do
     ev <- STM.atomically . STM.readTChan $ netOutbox
-    mapM_ (SBS.sendAllTo sock (BS.pack $ show ev)) dests
+    mapM_ (SBS.sendAllTo sock . BS.pack . show $ ev) dests
     STM.atomically $ STM.writeTChan netInbox ev -- XXX skip the network for ui feedback?
 
 -- | Block until the network receives a packet, deserialize it and emit to
@@ -112,14 +114,17 @@ protocolReordering State{appState, netInbox} = do
 
 -- * Application
 
+-- | Application/UI state
 data AppState = AppState
     { username :: String
     , buffer :: String
     , curPos :: Int
-    -- | stored in reverse order
+    -- | History is stored in reverse order
     , history :: [String]
     } deriving Eq
+-- | Local events used for UI updates
 type LocalEvent = Vty.Event
+-- | Replicated event type for sharing state, and also the wire format
 data NetEvent = NetEvent
     { sender :: String
     , message :: String
@@ -133,9 +138,11 @@ fixState state@AppState{buffer, curPos, history} = state
         , history = take 10 history
         }
 
+-- | State transformer for emitting log messages
 applyLog :: String -> String -> AppState -> AppState
 applyLog tag message state@AppState{history} = state{history=('<':tag++'>':' ':message):history}
 
+-- | State transformer for handling UI input
 applyLocalEvent :: LocalEvent -> AppState -> AppState
 applyLocalEvent event state@AppState{buffer, curPos} = fixState $ case event of
     Vty.EvKey  Vty.KEnter   [] -> state{buffer="", curPos=0}
@@ -152,15 +159,18 @@ applyLocalEvent event state@AppState{buffer, curPos} = fixState $ case event of
     safeInit [] = []
     safeInit xs = init xs
 
+-- | Generate a net-event from a local-event, for replication
 generateNetEvent :: LocalEvent -> AppState -> Maybe NetEvent
 generateNetEvent event AppState{username, buffer} = case event of
     Vty.EvKey  Vty.KEnter   [] -> if null buffer then Nothing else Just NetEvent{sender=username, message=buffer}
     _                          -> Nothing
 
+-- | State transformer for handling replication events
 applyNetEvent :: NetEvent -> AppState -> AppState
 applyNetEvent event state@AppState{history} = fixState $ case event of
     NetEvent{sender, message} -> state{history=('[':sender++']':' ':message):history}
 
+-- | Draw the UI
 render :: AppState -> Vty.Picture
 render AppState{username, buffer, curPos, history} = Vty.emptyPicture
     { Vty.picCursor = Vty.Cursor (length username + 3 + curPos) (length history)
