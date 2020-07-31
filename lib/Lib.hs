@@ -24,7 +24,6 @@ withSock :: Maybe S.HostName -> Maybe S.ServiceName -> (S.Socket -> IO c) -> IO 
 withSock host service = Exception.bracket
     (do addr:_ <- S.getAddrInfo (Just S.defaultHints{S.addrSocketType=S.Datagram}) host service
         sock <- S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)
-        -- S.setSocketOption sock S.ReusePort 1 -- XXX probably shouldn't leave this enabled by default because it gives weird behavior
         S.setSocketOption sock S.Broadcast 1
         S.bind sock $ S.addrAddress addr
         return sock)
@@ -32,30 +31,32 @@ withSock host service = Exception.bracket
 
 main :: IO ()
 main = do
-    (username, listenAddr, sendAddr, port) <- getArgs >>= \case
-        ["ipv6-multi", u] -> return ("IPv6-multi-"++u, "::", "ff02::1", "8999")
-        ["ipv4-multi", u] -> return ("IPv4-multi-"++u, "0.0.0.0", "224.0.0.1", "8999")
-        ["ipv4-broad", u] -> return ("IPv6-broad-"++u, "0.0.0.0", "192.168.1.255", "8999")
-        [name] -> return (name, "0.0.0.0", "192.168.1.255", "8999")
-        [u, la, sa, p] -> return (u, la, sa, p)
-        _ -> getProgName >>= \prog -> error $ "USAGE: "++prog++" username listen-addr send-addr port"
+    opts@(username, listenHost, listenPort, dests) <- getArgs >>= \case
+        [name] -> return (name, "0.0.0.0", "8999", [("192.168.1.255", "8999")])
+        (name:listenHost:listenPort:dests) -> return (name, listenHost, listenPort, pairs dests)
+        _ -> getProgName >>= \prog -> error $ "USAGE: \n\t"++prog++" username\n\t"++prog++" username listenHost listenPort [destHost destPort ...]"
+    print opts
     state <- State
         <$> (STM.newTVarIO AppState{username, buffer="", curPos=0, history=[]})
         <*> STM.newTChanIO
         <*> STM.newTChanIO
-    bcast <- do
-        info:_ <- S.getAddrInfo  (Just S.defaultHints{S.addrSocketType=S.Datagram}) (Just sendAddr) (Just port)
-        return $ S.addrAddress info
-    withSock (Just listenAddr) (Just port) $ \sock ->
+    destAddrs <- flip mapM dests $ \(destHost, destPort) -> do
+        addr:_ <- S.getAddrInfo  (Just S.defaultHints{S.addrSocketType=S.Datagram}) (Just destHost) (Just destPort)
+        return $ S.addrAddress addr
+    withSock (Just listenHost) (Just listenPort) $ \sock ->
         withVty $ \vty -> do
             _ <- Async.waitAny =<< mapM (\act -> Async.async . forever . act $ state)
                 [ forever . frontendInput vty
                 , forever . frontendDisplay vty
-                , forever . backendSend sock bcast
+                , forever . backendSend sock destAddrs
                 , forever . backendReceive sock
                 , forever . protocolReordering
                 ]
             return ()
+  where
+    pairs (a:b:xs) = (a,b):pairs xs
+    pairs [] = []
+    pairs [x] = error $ "expected a pair of items, got: " ++ x
 
 -- * Framework
 
