@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE TupleSections #-}
 module Lib where
 
 import Control.Monad (forever)
@@ -9,6 +10,7 @@ import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.STM as STM
 import qualified Control.Exception as Exception
 import qualified Data.ByteString.Char8 as BS
+import qualified Data.List as List
 import qualified Graphics.Vty as Vty
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SBS
@@ -36,21 +38,23 @@ main = do
         (name:listenHost:listenPort:dests) -> return (name, listenHost, listenPort, pairs dests)
         _ -> getProgName >>= \prog -> error $ "USAGE: \n\t"++prog++" username\n\t"++prog++" username listenHost listenPort [destHost destPort ...]"
     print opts
-    state <- State
-        <$> (STM.newTVarIO AppState{username, buffer="", curPos=0, history=[]})
-        <*> STM.newTChanIO
-        <*> STM.newTChanIO
     destAddrs <- flip mapM dests $ \(destHost, destPort) -> do
         addr:_ <- S.getAddrInfo  (Just S.defaultHints{S.addrSocketType=S.Datagram}) (Just destHost) (Just destPort)
         return $ S.addrAddress addr
+    state <- State
+        <$> (STM.newTVarIO AppState{username, buffer="", curPos=0, history=[]})
+        <*> (STM.newTVarIO $ (,"") <$> destAddrs)
+        <*> STM.newTChanIO
+        <*> STM.newTChanIO
     withSock (Just listenHost) (Just listenPort) $ \sock ->
         withVty $ \vty -> do
-            S.getSocketName sock >>= \n -> logIO "listen-on" (show n) state
-            logIO "send-to" (unwords $ show <$> destAddrs) state
+            S.getSocketName sock >>= \n -> STM.atomically $ do
+                logAct "listen-on" (show n) state
+                logAct "send-to" (unwords $ show <$> destAddrs) state
             _ <- Async.waitAny =<< mapM (\act -> Async.async . forever . act $ state)
                 [ forever . frontendInput vty
                 , forever . frontendDisplay vty
-                , forever . backendSend sock destAddrs
+                , forever . backendSend sock
                 , forever . backendReceive sock
                 , forever . protocolReordering
                 ]
@@ -64,13 +68,14 @@ main = do
 
 data State as ev = State
     { appState :: STM.TVar as
+    , peers :: STM.TVar [(S.SockAddr, String)]
     , netOutbox :: STM.TChan ev
     , netInbox :: STM.TChan ev
     }
 
 -- | Logging utility
-logIO :: String -> String -> State AppState ev -> IO ()
-logIO tag message State{appState} = STM.atomically $ STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
+logAct :: String -> String -> State AppState ev -> STM.STM ()
+logAct tag message State{appState} = STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
 
 -- | Block until a `vty` event, apply the event to `appState`, optionally emit
 -- to `netOutbox`.
@@ -91,18 +96,32 @@ frontendDisplay vty State{appState} = do
 
 -- | Block until a `netOutbox` event, broadcast it to the network (and also
 -- copy it over to `netInbox`).
-backendSend :: S.Socket -> [S.SockAddr] -> State AppState NetEvent -> IO ()
-backendSend sock dests State{netOutbox, netInbox} = do
-    ev <- STM.atomically . STM.readTChan $ netOutbox
-    mapM_ (SBS.sendAllTo sock . BS.pack . show $ ev) dests
+backendSend :: S.Socket -> State AppState NetEvent -> IO ()
+backendSend sock State{peers, netOutbox, netInbox} = do
+    (peers_, ev) <- STM.atomically $ (,) <$> STM.readTVar peers <*> STM.readTChan netOutbox
+    mapM_ (SBS.sendAllTo sock . BS.pack . show $ ev) . fmap fst $ peers_
     STM.atomically $ STM.writeTChan netInbox ev -- XXX skip the network for ui feedback?
 
 -- | Block until the network receives a packet, deserialize it and emit to
 -- `netInbox`.
 backendReceive :: S.Socket -> State AppState NetEvent -> IO ()
-backendReceive sock s@State{netInbox} = do
-    (raw, _) <- SBS.recvFrom sock 4096
-    maybe (logIO "recv-malformed" (BS.unpack raw) s) (STM.atomically . STM.writeTChan netInbox) (readMaybe . BS.unpack $ raw)
+backendReceive sock s@State{peers, netInbox} = do
+    (raw, senderAddr) <- SBS.recvFrom sock 4096
+    STM.atomically . maybe
+        (logAct "recv-malformed" (show senderAddr++',':BS.unpack raw) s)
+        (\ev -> STM.writeTChan netInbox ev >> updatePeers senderAddr ev)
+        . readMaybe . BS.unpack $ raw
+  where
+    updatePeers senderAddr NetEvent{sender=senderName} = do
+        peers_ <- STM.readTVar peers
+        case lookup senderAddr peers_ of
+            Nothing -> do
+                STM.writeTVar peers $ (senderAddr,senderName):peers_
+                logAct "new-peer" (show senderAddr++" is called "++senderName) s
+            Just peerName | peerName /= senderName -> do
+                STM.writeTVar peers $ (senderAddr,senderName):List.delete (senderAddr,peerName) peers_
+                logAct "changed-peer" (show senderAddr++" is now called "++senderName) s
+            _ -> return () -- known peer
 
 -- | Block until a `netInbox` event and apply it to `appState`.
 protocolReordering :: State AppState NetEvent -> IO ()
