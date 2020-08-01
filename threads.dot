@@ -11,5 +11,5 @@ digraph G {
 
     UDP_RECV -> netInbox [label="backendReceive", color=orange];
 
-    netInbox -> appState [label="protocolReordering", color=yellow];
+    netInbox -> appState [label="protocolReordering", color=red];
 }
