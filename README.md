@@ -30,24 +30,24 @@ This is a small haskell program implementing a udp broadcast chat client.
 
 ### threads (colored arrows)
 
-1. <span style="color:green;">**frontendInput**</span>: Block until a `vty` event, apply the event to `appState`,
+1. <span class="text-green">**frontendInput**</span>: Block until a `vty` event, apply the event to `appState`,
    optionally emit to `netOutbox`.
     * Not all `vty` events require a network event. When typing into the
       buffer, events are handled by applying to `appState` directly so the UI
       can update. When you press the "Enter" key, the buffer is cleared and a
       network event is emitted.
-1. <span style="color:purple;">**fontendDisplay**</span>: Render `appState` to `vty` and then block until `appState`
+1. <span class="text-purple">**fontendDisplay**</span>: Render `appState` to `vty` and then block until `appState`
    changes.
-1. <span style="color:blue;">**backendSend**</span>: Block until a `netOutbox` event, broadcast it to the network
+1. <span class="text-blue">**backendSend**</span>: Block until a `netOutbox` event, broadcast it to the network
    (and also copy it over to `netInbox`).
     * We copy events directly from the outbox to the inbox because the user
       shouldn't have to wait for the network to get feedback from the UI. If
       you're implementing a message-delivery protocol, then you might be
       required to order outgoing messages, and so this behavior might be
       incorrect.
-1. <span style="color:orange;">**backendReceive**</span>: Block until the network receives a packet, deserialize it
+1. <span class="text-orange">**backendReceive**</span>: Block until the network receives a packet, deserialize it
    and emit to `netInbox`.
-1. <span style="color:red;">**protocolReordering**</span>: Block until a `netInbox` event and apply it to
+1. <span class="text-red">**protocolReordering**</span>: Block until a `netInbox` event and apply it to
    `appState`.
     * This is kind of a silly thread that doesn't do very much but shuffle
       things between references. It's somewhat of a placeholder for if you were
