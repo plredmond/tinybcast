@@ -45,8 +45,9 @@ main = do
         return $ S.addrAddress addr
     withSock (Just listenHost) (Just listenPort) $ \sock ->
         withVty $ \vty -> do
-            S.getSocketName sock >>= \n -> logIO "listen-on" (show n) state
-            logIO "send-to" (unwords $ show <$> destAddrs) state
+            S.getSocketName sock >>= \n -> STM.atomically $ do
+                logAct "listen-on" (show n) state
+                logAct "send-to" (unwords $ show <$> destAddrs) state
             _ <- Async.waitAny =<< mapM (\act -> Async.async . forever . act $ state)
                 [ forever . frontendInput vty
                 , forever . frontendDisplay vty
@@ -69,8 +70,8 @@ data State as ev = State
     }
 
 -- | Logging utility
-logIO :: String -> String -> State AppState ev -> IO ()
-logIO tag message State{appState} = STM.atomically $ STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
+logAct :: String -> String -> State AppState ev -> STM.STM ()
+logAct tag message State{appState} = STM.writeTVar appState . applyLog tag message =<< STM.readTVar appState
 
 -- | Block until a `vty` event, apply the event to `appState`, optionally emit
 -- to `netOutbox`.
@@ -102,7 +103,7 @@ backendSend sock dests State{netOutbox, netInbox} = do
 backendReceive :: S.Socket -> State AppState NetEvent -> IO ()
 backendReceive sock s@State{netInbox} = do
     (raw, _) <- SBS.recvFrom sock 4096
-    maybe (logIO "recv-malformed" (BS.unpack raw) s) (STM.atomically . STM.writeTChan netInbox) (readMaybe . BS.unpack $ raw)
+    STM.atomically . maybe (logAct "recv-malformed" (BS.unpack raw) s) (STM.writeTChan netInbox) . readMaybe . BS.unpack $ raw
 
 -- | Block until a `netInbox` event and apply it to `appState`.
 protocolReordering :: State AppState NetEvent -> IO ()
