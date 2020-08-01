@@ -4,10 +4,12 @@ This is a small haskell program implementing a udp broadcast chat client.
 
 ![bcast](bcast.png)
 
-Usage:
+### usage
 
-* You can run with `USAGE: bcast username listen-addr send-addr port`
-* Or you can just use `USAGE: bcast username`
+* You can run with..
+    * `bcast username` to broadcast on a LAN, or..
+    * `bcast username listenHost listenPort [destHost destPort ...]` to specify
+      alternate destination addresses.
 * Type words, use the left, right, home, end keys to move the cursor.
 * Press enter to send.
 * Press escape to quit. (`/quit` isn't a command, just for show)
@@ -38,19 +40,20 @@ There are five threads:
    (and also copy it over to `netInbox`).
     * We copy events directly from the outbox to the inbox because the user
       shouldn't have to wait for the network to get feedback from the UI. If
-      you're implementing a consensus protocol, then you might be required to
-      order outgoing messages, and so this behavior might be incorrect.
+      you're implementing a message-delivery protocol, then you might be
+      required to order outgoing messages, and so this behavior might be
+      incorrect.
 1. *backendReceive*: Block until the network receives a packet, deserialize it
    and emit to `netInbox`.
 1. *protocolReordering*: Block until a `netInbox` event and apply it to
    `appState`.
     * This is kind of a silly thread that doesn't do very much but shuffle
       things between references. It's somewhat of a placeholder for if you were
-      implementing a consensus protocol. Much of the time you'd need to reorder
-      and delay received messages before delivering them to the application.
-      This thread might be where that code would go?
+      implementing a message-delivery protocol. Much of the time you'd need to
+      reorder and delay received messages before delivering them to the
+      application. This thread might be where that code would go?
 
-Dependencies:
+### dependencies
 
 * `vty` provides the UI.
 * `network` provides the sockets.
