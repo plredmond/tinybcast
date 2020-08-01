@@ -36,13 +36,13 @@ main = do
         (name:listenHost:listenPort:dests) -> return (name, listenHost, listenPort, pairs dests)
         _ -> getProgName >>= \prog -> error $ "USAGE: \n\t"++prog++" username\n\t"++prog++" username listenHost listenPort [destHost destPort ...]"
     print opts
+    destAddrs <- flip mapM dests $ \(destHost, destPort) -> do
+        addr:_ <- S.getAddrInfo  (Just S.defaultHints{S.addrSocketType=S.Datagram}) (Just destHost) (Just destPort)
+        return $ S.addrAddress addr
     state <- State
         <$> (STM.newTVarIO AppState{username, buffer="", curPos=0, history=[]})
         <*> STM.newTChanIO
         <*> STM.newTChanIO
-    destAddrs <- flip mapM dests $ \(destHost, destPort) -> do
-        addr:_ <- S.getAddrInfo  (Just S.defaultHints{S.addrSocketType=S.Datagram}) (Just destHost) (Just destPort)
-        return $ S.addrAddress addr
     withSock (Just listenHost) (Just listenPort) $ \sock ->
         withVty $ \vty -> do
             S.getSocketName sock >>= \n -> STM.atomically $ do
